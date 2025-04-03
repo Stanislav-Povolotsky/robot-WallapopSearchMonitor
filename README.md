@@ -30,10 +30,10 @@ Made to run on Windows and designed for easy `.exe` packaging — no terminal or
 ## 🔐 How to Get Your Wallapop Token
 
 1. Log into [https://www.wallapop.com](https://www.wallapop.com)
-2. Open your browser dev tools (usually F12)
+2. Open your browser dev tools (usually Ctrl + Shift + I )
 3. Go to the **Network** tab
 4. Refresh the page
-5. Look for a request to `/api/v3/users/me`
+5. Look for a request to `/me`
 6. Open the request headers and find this line:
 
 ```
