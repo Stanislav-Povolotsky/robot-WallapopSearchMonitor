@@ -12,6 +12,7 @@ Made to run on Windows and designed for easy `.exe` packaging — no terminal or
 - ✅ Monitors your **saved alerts** (`/searchalerts/savedsearch`)
 - ✅ Automatically opens your default browser when new items are posted
 - ✅ Runs in the background every 10 seconds
+- ✅ No console or terminal needed
 - ✅ Works with `.exe` generated via PyInstaller
 
 ---
@@ -32,6 +33,66 @@ Made to run on Windows and designed for easy `.exe` packaging — no terminal or
 2. Open your browser dev tools (usually F12)
 3. Go to the **Network** tab
 4. Refresh the page
-5. Look for a request to `/me`
+5. Look for a request to `/api/v3/users/me`
 6. Open the request headers and find this line:
 
+```
+Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOi...
+```
+
+7. Copy only the token (everything **after** `Bearer `)
+
+---
+
+## ▶️ How to Use
+
+1. Run the script:
+
+```bash
+python wallapop_monitor.py
+```
+
+2. A Notepad window will open asking you to paste your Wallapop token
+3. Replace the sample line with your token, press `Ctrl+S` to save, and close Notepad
+4. The script starts running and checks for updates every 10 seconds
+
+---
+
+## 📦 Build the .EXE
+
+To create a Windows `.exe` that runs without a console:
+
+```bash
+pyinstaller --onefile wallapop_monitor.py
+```
+
+Output will be in the `dist/` folder:
+```
+dist\wallapop_monitor.exe
+```
+
+---
+
+## 🗂 Where is the token saved?
+
+Your token is saved to:
+
+```
+%APPDATA%\wallapop_python_token.txt
+```
+
+You can delete that file to be prompted again.
+
+---
+---
+
+## 👤 Author
+
+Made with ❤️ by **Telmo Ferreira**  
+Feel free to fork, open issues, or contribute.
+
+---
+
+## 📄 License
+
+MIT License — use it freely, just don't resell it.
