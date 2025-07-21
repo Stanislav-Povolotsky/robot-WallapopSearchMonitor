@@ -6,7 +6,8 @@ import webbrowser
 import os
 import pprint
 import ctypes
-
+from uuid import uuid4
+import urllib.parse
 # Settings
 BASE_FILENAME = "wallapop_python"
 TOKEN_FILENAME = f"{BASE_FILENAME}_token.txt"
@@ -122,9 +123,17 @@ def check_for_items(headers):
                 f"{key}={','.join(map(str, value))}" if isinstance(value, list) else f"{key}={value}"
                 for key, value in query.items() if value
             ])
-            full_url = f"{base_url}?{params}&filters_source=stored_filters"
+
+
+            keywords = query.get("keywords")
+            if not keywords:
+                continue
+
+            search_id = str(uuid4())
+            full_url = f"https://api.wallapop.com/api/v3/search?source=search_box&keywords={urllib.parse.quote_plus(keywords)}&search_id={search_id}"
             print(f"Requesting URL: {full_url}")
 
+ 
             response = requests.get(full_url, headers=headers, timeout=15)
             if response.status_code == 401:
                 print("Invalid token!")
