@@ -129,8 +129,11 @@ def check_for_items(headers):
             if not keywords:
                 continue
 
-            search_id = str(uuid4())
-            full_url = f"https://api.wallapop.com/api/v3/search?source=search_box&keywords={urllib.parse.quote_plus(keywords)}&search_id={search_id}"
+ 
+            encoded_keywords = urllib.parse.quote_plus(keywords)
+            full_url = f"https://api.wallapop.com/api/v3/search?source=search_box&keywords={encoded_keywords}"
+
+            
             print(f"Requesting URL: {full_url}")
 
  
@@ -147,14 +150,16 @@ def check_for_items(headers):
                 last_item = items[0]
                 item_id = last_item.get("id")
 
-                if full_url in last_items and last_items[full_url] != item_id:
-                    print(f"🔔 New item found for '{query.get('keywords')}'!")
+                if full_url not in last_items:
+                    last_items[full_url] = item_id
+                    print(f"✅ First check for '{keywords}'.")
+                elif last_items[full_url] != item_id:
+                    print(f"🔔 New item found for '{keywords}'!")
                     pprint.pprint(last_item)
                     last_items[full_url] = item_id
                     open_in_browser(query)
                 else:
-                    print(f"✅ First check for '{query.get('keywords')}'.")
-                    last_items[full_url] = item_id
+                    print(f"⏸ No new items for '{keywords}'.")
 
     except requests.exceptions.RequestException as e:
         print(f"Request error: {e}")
