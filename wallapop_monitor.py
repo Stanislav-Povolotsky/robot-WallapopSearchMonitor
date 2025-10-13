@@ -83,7 +83,7 @@ def has_console():
 
 def show_message(title, text):
     if has_console():
-        log.debug(f"{title}\n{text}")
+        log.debug(f"{title}: {text}")
         return
     if ctypes_imported:
         ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
@@ -92,37 +92,55 @@ def extract_headers_from_copied_fetch_request(fetch_request):
     """
     Extracts headers and token from a copied fetch(...) request.
     """
+    fetch_data = None
+    headers = None
+    token = None
+
     # Extract first valid (non-empty, non-comment) line
     query_json_str = ""
     opened = False
     lines = fetch_request.splitlines() if isinstance(fetch_request, str) else (fetch_request if isinstance(fetch_request, list) else [])
-    for line in lines:
-        line = line.strip()
-        if opened:
-            query_json_str += line
-        if not opened and line.startswith("fetch("):
-            opened = True
-            query_json_str = ""
-        elif opened and line == "});":
-            opened = False
-            break
-    headers = None
-    token = None
-    if query_json_str:
+    lines_str = "\n".join(lines).strip()
+    if lines_str[:1] == '{' and lines_str[-1:] == '}':
         try:
-            # Extract JSON part
-            json_start = 0
-            json_end = query_json_str.rindex("}") + 1
-            json_str = query_json_str[json_start:json_end]
-            if not json_str.startswith("{"):
-                json_str = "{" + json_str
+            fetch_data = json.loads(lines_str)
+            token = fetch_data.get("Authorization", "").replace("Bearer ", "")
+            if not token or len(token) < 50:
+                raise Exception("Authorization token is missing")
+            return fetch_data, token
+        except Exception as e:
+            pass
 
+    if not fetch_data:
+        for line in lines:
+            line = line.strip()
+            if opened:
+                query_json_str += line
+            if not opened and line.startswith("fetch("):
+                opened = True
+                query_json_str = ""
+            elif opened and line == "});":
+                opened = False
+                break
+        if query_json_str:
             try:
-                fetch_data = json.loads(json_str)
+                # Extract JSON part
+                json_start = 0
+                json_end = query_json_str.rindex("}") + 1
+                json_str = query_json_str[json_start:json_end]
+                if not json_str.startswith("{"):
+                    json_str = "{" + json_str
+                try:
+                    fetch_data = json.loads(json_str)
+                except Exception as e:
+                    log.debug(f"Seems like the pasted data is not valid JSON: {json_str}")
+                    raise Exception(f"Error decoding JSON: {e}")
+
             except Exception as e:
-                log.debug(f"Seems like the pasted data is not valid JSON: {json_str}")
-                raise Exception(f"Error decoding JSON: {e}")
-            
+                raise Exception(f"Error parsing pasted data: {e}")
+
+    if fetch_data:
+        try:
             headers = fetch_data.get("headers", {})
             headers = {k.title(): v for k, v in headers.items()}
             token = headers.get("Authorization", "").replace("Bearer ", "")
@@ -134,7 +152,7 @@ def extract_headers_from_copied_fetch_request(fetch_request):
             if referrer:
                 headers['Referer'] = referrer
         except Exception as e:
-            raise Exception(f"Error parsing pasted data: {e}")
+            raise Exception(f"Error extracting headers/token: {e}")
         
     return headers, token
 
@@ -267,10 +285,10 @@ def check_for_items(headers):
 
                 if (encoded_arguments not in last_items):
                     last_items[encoded_arguments] = items_ids
-                    log.debug(f"✅ First check for '{keywords}': {items_ids_diff}.")
+                    log.debug(f"✅ First check for '{keywords}': Found {len(items_ids_diff)} items.")
                     last_items_updated = True
                 elif items_ids_diff:
-                    log.debug(f"🔔 New item found for '{keywords}': {items_ids_diff}")
+                    log.debug(f"🔔 New item found for '{keywords}': Found {len(items_ids_diff)} new items.")
                     last_items[encoded_arguments] |= items_ids
                     last_items_updated = True
                     for item_id in items_ids_diff:
@@ -311,22 +329,64 @@ def init_logger():
 
     log.addHandler(console_handler)
 
-def main():
+def watcher(headers=None, fn_request_new_headers=None, clear_last_items=False):
     global last_items
-    init_logger()
-    last_items = load_last_items()
+    if not clear_last_items:
+        last_items = load_last_items()
+    else:
+        last_items = {}
+        save_last_items(last_items)
     log.debug("Starting watch...")
 
-    headers = load_headers_template()
+    if not headers:
+        headers = load_headers_template()
+    else:
+        save_headers_template(headers)
 
     while True:
         if (not headers) or (not check_for_items(headers)) :
-            headers = ask_for_new_headers()
+            if fn_request_new_headers:
+                headers = fn_request_new_headers()
             if not headers:
                 show_message("Token missing", "No token entered. Closing app.")
                 return
             save_headers_template(headers)
         time.sleep(OPTION_TIMEOUT_BETWEEN_GROUP_REQUESTS)
+
+def main():
+    global STORAGE_PATH, OPTION_OPEN_BROWSER
+    import argparse
+    parser = argparse.ArgumentParser(description="Wallapop Monitor")
+    parser.add_argument('--storage-path', type=str, default=STORAGE_PATH, help='Path to store configuration files')
+    parser.add_argument('--request-file', type=str, default=None, help='Path to a file containing the fetch(...) request to extract headers and token')
+    parser.add_argument('--windows-mode', action='store_true', help='Run in Windows mode (ask for new headers if needed)')
+    parser.add_argument('--clear-cache', action='store_true', help='Clear saved last items cache')
+    args = parser.parse_args()
+    STORAGE_PATH = args.storage_path
+    windows_mode = args.windows_mode and (platform.system() == "Windows")
+    clear_cache = args.clear_cache
+    OPTION_OPEN_BROWSER = windows_mode
+                        
+    init_logger()
+    headers = None
+
+    if args.request_file:
+        if os.path.exists(args.request_file):
+            with open(args.request_file, "rt", encoding="utf8") as file:
+                fetch_request = file.read()
+            try:
+                headers, token = extract_headers_from_copied_fetch_request(fetch_request)
+                if not headers:
+                    log.error("No headers extracted from the provided file.")
+                else:
+                    log.debug(f"[DEBUG] Token from file: '{token}'")
+            except Exception as e:
+                log.error(f"Error extracting headers from file: {e}")
+        else:
+            log.error(f"Provided request file does not exist or is empty: {args.request_file}")
+
+    watcher(headers=headers, fn_request_new_headers=ask_for_new_headers if windows_mode else None, clear_last_items=clear_cache)
+
 
 if __name__ == "__main__":
     main()
