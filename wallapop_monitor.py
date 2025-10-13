@@ -1,69 +1,172 @@
 # pyinstaller --onefile wallapop_monitor.py
 
+import traceback
 import requests
 import time
 import webbrowser
 import os
-import pprint
-import ctypes
 from uuid import uuid4
 import urllib.parse
-# Settings
-BASE_FILENAME = "wallapop_python"
-TOKEN_FILENAME = f"{BASE_FILENAME}_token.txt"
-SAVED_SEARCH_URL = "https://api.wallapop.com/api/v3/searchalerts/savedsearch/"
+import json
+import logging
+import platform
 
-HEADERS_TEMPLATE = {
-    "Accept": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 OPR/114.0.0.0",
-    "Host": "api.wallapop.com",
-    "Origin": "https://pt.wallapop.com",
-    "Referer": "https://pt.wallapop.com/",
-    "x-appversion": "83540",
-    "x-deviceid": "01f7ed0d-4b82-44bb-ba34-04e2ff3cb409",
-    "x-deviceos": "0",
-    "Connection": "keep-alive",
-}
+# Settings
+STORAGE_PATH = "~"
+BASE_FILENAME = "wallapop_python"
+FILENAME_SAVED_HEADERS_TEMPLATE = f"{BASE_FILENAME}_headers_template.txt"
+FILENAME_SAVED_LAST_ITEMS = f"{BASE_FILENAME}_last_items.json"
+FILENAME_LOG = f"{BASE_FILENAME}.log"
+
+OPTION_TIMEOUT_BETWEEN_GROUP_REQUESTS = 20  # seconds
+OPTION_TIMEOUT_BETWEEN_SEARCH_REQUESTS = 1  # seconds
+
+OPTION_OPEN_BROWSER = True # Open browser when new item is found
+
+# URLs
+URL_WALLAPOP_API_SAVED_SEARCH = "https://api.wallapop.com/api/v3/searchalerts/savedsearch/"
+URL_WALLAPOP_API_SEARCH = "https://api.wallapop.com/api/v3/search"
+URL_WALLAPOP_MAIN = "https://es.wallapop.com"
+URL_WALLAPOP_MAIN_ITEM = f"{URL_WALLAPOP_MAIN}/item/"
+
+# Setup logging
+log = logging.getLogger(__name__)
 
 # Track last seen items
 last_items = {}
 
 def get_file_path(filename):
-    base_dir = os.getenv("APPDATA") or os.path.expanduser("~")
+    base_dir = (os.getenv("APPDATA") or os.path.expanduser("~")) if STORAGE_PATH == "~" else STORAGE_PATH
     return os.path.join(base_dir, filename)
 
-def load_token():
-    token_path = get_file_path(TOKEN_FILENAME)
-    if os.path.exists(token_path) and os.path.getsize(token_path) > 0:
-        with open(token_path, "r") as file:
-            return file.read().strip()
+def load_headers_template():
+    saved_headers_template_file = get_file_path(FILENAME_SAVED_HEADERS_TEMPLATE)
+    if os.path.exists(saved_headers_template_file) and os.path.getsize(saved_headers_template_file) > 0:
+        with open(saved_headers_template_file, "rt", encoding="utf8") as file:
+            return json.load(file)
     return None
 
-def save_token(token):
-    token_path = get_file_path(TOKEN_FILENAME)
-    with open(token_path, "w") as file:
-        file.write(token)
+def save_headers_template(header_template):
+    saved_headers_template_file = get_file_path(FILENAME_SAVED_HEADERS_TEMPLATE)
+    with open(saved_headers_template_file, "wt", encoding="utf8") as file:
+        json.dump(header_template, file, indent=2, ensure_ascii=False)
+
+def load_last_items():
+    last_items_file = get_file_path(FILENAME_SAVED_LAST_ITEMS)
+    if os.path.exists(last_items_file) and os.path.getsize(last_items_file) > 0:
+        with open(last_items_file, "rt", encoding="utf8") as file:
+            last_items = json.load(file)
+    else:
+        last_items = {}
+    return last_items
+
+def save_last_items(last_items):
+    last_items_file = get_file_path(FILENAME_SAVED_LAST_ITEMS)
+    with open(last_items_file, "wt", encoding="utf8") as file:
+        json.dump(last_items, file, indent=2, ensure_ascii=False)
 
 def update_headers_with_token(headers, token):
     headers["Authorization"] = f"Bearer {token}"
 
+ctypes_imported = False
+try:
+    if platform.system() == "Windows":
+        import ctypes
+        ctypes_imported = True
+except:
+    pass
+
+def has_console():
+    if not ctypes_imported: return True
+    # Returns True if the process has a console attached
+    return ctypes.windll.kernel32.GetConsoleWindow() != 0
+
 def show_message(title, text):
-    ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
+    if has_console():
+        log.debug(f"{title}\n{text}")
+        return
+    if ctypes_imported:
+        ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
 
-
-def ask_token():
+def extract_headers_from_copied_fetch_request(fetch_request):
     """
-    Opens Notepad so the user can paste their full Wallapop token.
-    This avoids InputBox limits and supports long tokens.
+    Extracts headers and token from a copied fetch(...) request.
+    """
+    # Extract first valid (non-empty, non-comment) line
+    query_json_str = ""
+    opened = False
+    lines = fetch_request.splitlines() if isinstance(fetch_request, str) else (fetch_request if isinstance(fetch_request, list) else [])
+    for line in lines:
+        line = line.strip()
+        if opened:
+            query_json_str += line
+        if not opened and line.startswith("fetch("):
+            opened = True
+            query_json_str = ""
+        elif opened and line == "});":
+            opened = False
+            break
+    headers = None
+    token = None
+    if query_json_str:
+        try:
+            # Extract JSON part
+            json_start = 0
+            json_end = query_json_str.rindex("}") + 1
+            json_str = query_json_str[json_start:json_end]
+            if not json_str.startswith("{"):
+                json_str = "{" + json_str
+
+            try:
+                fetch_data = json.loads(json_str)
+            except Exception as e:
+                log.debug(f"Seems like the pasted data is not valid JSON: {json_str}")
+                raise Exception(f"Error decoding JSON: {e}")
+            
+            headers = fetch_data.get("headers", {})
+            headers = {k.title(): v for k, v in headers.items()}
+            token = headers.get("Authorization", "").replace("Bearer ", "")
+            if fetch_data.get("method", "") == "OPTIONS":
+                raise Exception("Request is an OPTIONS request, a GET request is needed.")
+            if not token or len(token) < 50:
+                raise Exception("Authorization token is missing")
+            referrer = fetch_data.get("referrer", "")
+            if referrer:
+                headers['Referer'] = referrer
+        except Exception as e:
+            raise Exception(f"Error parsing pasted data: {e}")
+        
+    return headers, token
+
+
+def ask_for_new_headers():
+    """
+    Opens Notepad so the user can paste the fetch(...) request.
+    This function will parse the pasted data and extract the headers and token.
     """
     import subprocess
     import tempfile
 
     instructions = (
-        "Paste your Wallapop token below, replacing this line.\n\n"
-        "Example:\n"
-        "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9...\n\n"
-        "👉 After pasting your token, press Ctrl+S to save, then close the Notepad window.\n"
+        "Open dev console and look for any GET request to: https://api.wallapop.com/api/v3/search\n"
+        "Click 'Copy => Copy as fetch' in the context menu of this request.\n\n"
+        "👉 After pasting your request, press Ctrl+S to save, then close the Notepad window.\n"
+        "Example:\n" +
+        """
+        fetch("https://api.wallapop.com/api/v3/search/filters/model?source=side_bar_filters&category_id=24200&keywords=Lo+que+queres&order_by=price_low_to_high", {
+          "headers": {
+            "accept": "application/json, text/plain, */*",
+            "authorization": "Bearer eyJhb...Op7A",
+            "deviceos": "0",
+            ...
+            "x-appversion": "811730",
+            "x-deviceid": "74c2d2d6-aade-4901-a70b-f5f7fd121537",
+            "x-deviceos": "0"
+          },
+          "referrer": "https://es.wallapop.com/",
+          "method": "GET",
+        });
+        """
     )
 
     # Create temp file with instructions
@@ -75,71 +178,81 @@ def ask_token():
     subprocess.run(["notepad.exe", file_path])
 
     # Read final token
-    with open(file_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    with open(file_path, "rt", encoding="utf-8") as f:
+        fetch_request = f.read()
 
     os.remove(file_path)
+    try:
+        headers, token = extract_headers_from_copied_fetch_request(fetch_request)
+    except Exception as e:
+        log.error(f"Error extracting headers: {e}")
+        return None
 
-    # Extract first valid (non-empty, non-comment) line
-    token = ""
-    for line in lines:
-        line = line.strip()
-        if line and not line.startswith("Paste your") and not line.startswith("Example:") and not line.startswith("👉"):
-            token = line
-            break
-
-    print(f"[DEBUG] Token from notepad: '{token}'")
-    return token
+    log.debug(f"[DEBUG] Token from notepad: '{token}'")
+    return headers
 
 
+def open_item_in_browser(url):
+    if OPTION_OPEN_BROWSER:
+        log.debug(f"Opening item: {url}")
+        webbrowser.open_new_tab(url)
 
-def open_in_browser(query_params):
-    query_string = "&".join([
-        f"{key}={','.join(map(str, value))}" if isinstance(value, list) else f"{key}={value}"
-        for key, value in query_params.items() if value
-    ])
-    search_url = f"https://pt.wallapop.com/app/search?{query_string}"
-    print(f"Opening search: {search_url}")
-    webbrowser.open_new_tab(search_url)
+g_custom_notification_fn = None
+try:
+    import _custom_notifications
+    g_custom_notification_fn = _custom_notifications.notify_new_item
+except:
+    _custom_notifications = None
+
+def notify_new_item(item_title, item_price, item_url):
+    log.info(f"New item found: '{item_title}' | {item_price} | {item_url}")
+    g_custom_notification_fn(item_title, item_price, item_url)
+    open_item_in_browser(item_url)
 
 def check_for_items(headers):
     global last_items
+    last_items_updated = False
     try:
-        print("Getting saved alerts...")
-        response = requests.get(SAVED_SEARCH_URL, headers=headers, timeout=15)
+        log.debug("Getting saved alerts...")
+        response = requests.get(URL_WALLAPOP_API_SAVED_SEARCH, headers=headers, timeout=15)
 
         if response.status_code in (400, 401):
-            print("Invalid or expired token!")
+            log.debug("Invalid or expired token!")
             return False
 
         response.raise_for_status()
         saved_alerts = response.json()
+        unused_queries = set(last_items.keys())
+        first_request = True
 
         for alert in saved_alerts:
             query = alert.get("query", {})
-            base_url = "https://api.wallapop.com/api/v3/search"
 
-            params = "&".join([
-                f"{key}={','.join(map(str, value))}" if isinstance(value, list) else f"{key}={value}"
-                for key, value in query.items() if value
+            exclude_params = set(['saved_search_id'])
+            filter_params = [(key, value) for key, value in query.items() if value if key not in exclude_params]
+            encoded_arguments = "&".join([
+                f"{key}={urllib.parse.quote_plus(','.join(map(str, value)))}" if isinstance(value, list) else f"{key}={urllib.parse.quote_plus(str(value))}"
+                for key, value in filter_params
             ])
 
-
+            unused_queries -= set([encoded_arguments])
             keywords = query.get("keywords")
             if not keywords:
                 continue
 
- 
-            encoded_keywords = urllib.parse.quote_plus(keywords)
-            full_url = f"https://api.wallapop.com/api/v3/search?source=search_box&keywords={encoded_keywords}"
-
+            full_url = f"{URL_WALLAPOP_API_SEARCH}?source=search_box&{encoded_arguments}"
             
-            print(f"Requesting URL: {full_url}")
+            # Waiting between requests (to avoid being blocked)
+            if not first_request:
+                time.sleep(OPTION_TIMEOUT_BETWEEN_SEARCH_REQUESTS)
+            else:
+                first_request = False
 
+            log.debug(f"Requesting URL: {full_url}")
  
             response = requests.get(full_url, headers=headers, timeout=15)
             if response.status_code == 401:
-                print("Invalid token!")
+                log.debug("Invalid token!")
                 return False
 
             response.raise_for_status()
@@ -147,50 +260,73 @@ def check_for_items(headers):
             items = data.get("data", {}).get("section", {}).get("payload", {}).get("items", [])
 
             if items:
-                last_item = items[0]
-                item_id = last_item.get("id")
+                #log.debug(json.dumps(items, indent=2))
+                items_map = {item.get("id"): item for item in items}
+                items_ids = list(items_map.keys())
+                items_ids_diff = set(items_ids) - (set(last_items[encoded_arguments]) if (encoded_arguments in last_items) else set())
 
-                if full_url not in last_items:
-                    last_items[full_url] = item_id
-                    print(f"✅ First check for '{keywords}'.")
-                elif last_items[full_url] != item_id:
-                    print(f"🔔 New item found for '{keywords}'!")
-                    pprint.pprint(last_item)
-                    last_items[full_url] = item_id
-                    open_in_browser(query)
+                if (encoded_arguments not in last_items):
+                    last_items[encoded_arguments] = items_ids
+                    log.debug(f"✅ First check for '{keywords}': {items_ids_diff}.")
+                    last_items_updated = True
+                elif items_ids_diff:
+                    log.debug(f"🔔 New item found for '{keywords}': {items_ids_diff}")
+                    last_items[encoded_arguments] |= items_ids
+                    last_items_updated = True
+                    for item_id in items_ids_diff:
+                        item = items_map[item_id]
+                        item_title = item.get("title", "No title")
+                        item_price = item.get("price", {"amount": "No", "currency": "price"})
+                        item_price = f'{item_price.get("amount", "n/a")} {item_price.get("currency", "")}'.strip()
+                        item_url = f'{URL_WALLAPOP_MAIN_ITEM}{urllib.parse.quote_plus(item.get("web_slug", ""))}'
+                        notify_new_item(item_title, item_price, item_url)
                 else:
-                    print(f"⏸ No new items for '{keywords}'.")
-
+                    log.debug(f"⏸ No new items for '{keywords}'.")
+        # Removing unused queries
+        for query in unused_queries:
+            last_items_updated = True     
+            del last_items[query]
+            log.debug(f"Removed unused query: {query}")
     except requests.exceptions.RequestException as e:
-        print(f"Request error: {e}")
+        log.error(f"Request error: {e}")
     except Exception as e:
-        print(f"Something went wrong: {e}")
+        log.error(f"Something went wrong: {e}")
+        log.error(traceback.format_exc())
+    if last_items_updated:
+        save_last_items(last_items)
     return True
+
+def init_logger():
+    log.setLevel(logging.DEBUG)
+    handler = logging.FileHandler(get_file_path(FILENAME_LOG), encoding='utf-8')
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+
+    # Create a console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.setFormatter(formatter)
+
+    log.addHandler(console_handler)
 
 def main():
     global last_items
-    print("Starting watch...")
+    init_logger()
+    last_items = load_last_items()
+    log.debug("Starting watch...")
 
-    token = load_token()
-    if not token:
-        token = ask_token()
-        if not token:
-            show_message("Token missing", "No token entered. Closing app.")
-            return
-        save_token(token)
-
-    headers = HEADERS_TEMPLATE.copy()
-    update_headers_with_token(headers, token)
+    headers = load_headers_template()
 
     while True:
-        if not check_for_items(headers):
-            token = ask_token()
-            if not token:
+        if (not headers) or (not check_for_items(headers)) :
+            headers = ask_for_new_headers()
+            if not headers:
                 show_message("Token missing", "No token entered. Closing app.")
                 return
-            save_token(token)
-            update_headers_with_token(headers, token)
-        time.sleep(10)
+            save_headers_template(headers)
+        time.sleep(OPTION_TIMEOUT_BETWEEN_GROUP_REQUESTS)
 
 if __name__ == "__main__":
     main()
