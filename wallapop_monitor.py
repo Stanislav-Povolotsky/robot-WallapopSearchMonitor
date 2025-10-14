@@ -216,15 +216,24 @@ def open_item_in_browser(url):
         webbrowser.open_new_tab(url)
 
 g_custom_notification_fn = None
+g_custom_notification_fn_error = None
 try:
     import _custom_notifications
     g_custom_notification_fn = _custom_notifications.notify_new_item
+    g_custom_notification_fn_error = _custom_notifications.notify_error
 except:
-    _custom_notifications = None
+    pass
 
 def notify_new_item(item_title, item_price, item_url):
     log.info(f"New item found: '{item_title}' | {item_price} | {item_url}")
-    g_custom_notification_fn(item_title, item_price, item_url)
+    if g_custom_notification_fn:
+        g_custom_notification_fn(item_title, item_price, item_url)
+    open_item_in_browser(item_url)
+
+def notify_error(error_text):
+    log.error(f"Error: {error_text}")
+    if g_custom_notification_fn_error:
+        g_custom_notification_fn_error(error_text)
     open_item_in_browser(item_url)
 
 def check_for_items(headers):
@@ -235,7 +244,7 @@ def check_for_items(headers):
         response = requests.get(URL_WALLAPOP_API_SAVED_SEARCH, headers=headers, timeout=15)
 
         if response.status_code in (400, 401):
-            log.debug("Invalid or expired token!")
+            log.error(f"Invalid or expired token! HTTP Code: {response.status_code}")
             return False
 
         response.raise_for_status()
@@ -289,7 +298,7 @@ def check_for_items(headers):
                     last_items_updated = True
                 elif items_ids_diff:
                     log.debug(f"🔔 New item found for '{keywords}': Found {len(items_ids_diff)} new items.")
-                    last_items[encoded_arguments] |= items_ids
+                    last_items[encoded_arguments].extend(list(items_ids_diff))
                     last_items_updated = True
                     for item_id in items_ids_diff:
                         item = items_map[item_id]
@@ -345,10 +354,12 @@ def watcher(headers=None, fn_request_new_headers=None, clear_last_items=False):
 
     while True:
         if (not headers) or (not check_for_items(headers)) :
+            headers = {}
             if fn_request_new_headers:
                 headers = fn_request_new_headers()
             if not headers:
                 show_message("Token missing", "No token entered. Closing app.")
+                notify_error("No valid token. Wallapop watch stopped")
                 return
             save_headers_template(headers)
         time.sleep(OPTION_TIMEOUT_BETWEEN_GROUP_REQUESTS)
